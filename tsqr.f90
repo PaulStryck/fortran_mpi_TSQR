@@ -1,10 +1,11 @@
 module reduction_tree_m
   use mpi_f08
+
   implicit none
 
   type reduction_tree_node
-    integer :: s1 = 0
-    integer :: s2 = 0
+    integer :: l = 0
+    integer :: r = 0
     integer :: parent = 0
     logical :: is_root = .false.
   end type
@@ -63,85 +64,100 @@ module tsqr
 
   implicit none
 
+  type qr_buffer
+    real(8), allocatable :: l(:,:)
+    real(8), allocatable :: r(:,:)
+  end type qr_buffer
+
 
   contains
     subroutine tsqr_reduction_tree_reduce(Q, R, tree)
-      real(8), intent(inout) :: Q(:,:)
+      real(8), intent(out)   :: Q(:,:)
       real(8), intent(inout) :: R(:,:)
       type(reduction_tree), intent(in) :: tree
 
-      real(8), allocatable :: R1(:,:), R2(:,:), Qin(:,:)
+      integer,            parameter :: TAG = 4733
+      type(MPI_DATATYPE), parameter :: dt  = MPI_REAL8
 
-      real(8), allocatable :: QintermedA(:,:,:), QintermedB(:,:,:)
-      TYPE(MPI_Request), allocatable :: recv_req1(:), recv_req2(:)
+      real(8), allocatable :: Qin(:,:)
+
+      type(qr_buffer), allocatable :: buff_q(:)
+      type(qr_buffer), allocatable :: buff_r(:)
+
+      type(mpi_request), allocatable :: recv_req_l(:), recv_req_r(:)
       type(mpi_request) :: leaf_req
-      integer, parameter :: TAG = 4733
-      type(MPI_DATATYPE) :: dt = MPI_REAL8
 
       integer :: i
       integer :: ier
       integer :: m, n
-      integer :: rnk
 
       m = size(Q, 1)
       n = size(Q, 2)
 
-      allocate(QintermedA(tree%nnodes, n, n))
-      allocate(QintermedB(tree%nnodes, n, n))
-      QintermedA = 0.0d0
-      QintermedB = 0.0d0
+      allocate(buff_R(tree%nnodes))
+      allocate(buff_Q(tree%nnodes))
 
-      allocate(recv_req1(tree%nnodes))
-      allocate(recv_req2(tree%nnodes))
+      do i = 1, tree%nnodes
+        allocate(buff_R(i)%l(n,n))
+        allocate(buff_R(i)%r(n,n))
 
-      call mpi_comm_rank(MPI_COMM_WORLD, rnk, ier)
+        allocate(buff_Q(i)%l(n,n))
+        allocate(buff_Q(i)%r(n,n))
+        buff_R(i)%l = 0.0d0
+        buff_R(i)%r = 0.0d0
 
-      allocate(R1(n,n), R2(n,n), Qin(n,n))
+        buff_Q(i)%r = 0.0d0
+        buff_Q(i)%l = 0.0d0
+      end do
 
-      R1  = 0.0d0
-      R2  = 0.0d0
+      allocate(recv_req_l(tree%nnodes))
+      allocate(recv_req_r(tree%nnodes))
+
+      allocate(Qin(n,n))
+
       Qin = 0.0d0
 
       ! recurse tree
       ! generate recv request for all nodes
       do i = 1, tree%nnodes
         ! receive left
-        call mpi_Irecv(R1, n*n, dt, tree%nodes(i)%s1, TAG, &
-          tree%comm, recv_req1(i), ier)
+        call mpi_Irecv(buff_R(i)%l, n*n, dt, tree%nodes(i)%l, &
+          TAG, tree%comm, recv_req_l(i), ier)
 
         ! receive right
-        call mpi_Irecv(R2, n*n, dt, tree%nodes(i)%s2, TAG, &
-          tree%comm, recv_req2(i), ier)
+        call mpi_Irecv(buff_R(i)%r, n*n, dt, tree%nodes(i)%r, &
+          TAG, tree%comm, recv_req_r(i), ier)
       end do
 
       ! send data to parent. Might be self
-      call mpi_send(R, n*n, dt, tree%parent_of_leaf, TAG, &
-        tree%comm, ier)
+      call mpi_send(R, n*n, dt, tree%parent_of_leaf, &
+        TAG, tree%comm, ier)
 
       ! actual reduce op
       do i = 1, tree%nnodes
-        call mpi_wait(recv_req1(i), MPI_STATUS_IGNORE, ier)
-        call mpi_wait(recv_req2(i), MPI_STATUS_IGNORE, ier)
+        call mpi_wait(recv_req_l(i), MPI_STATUS_IGNORE, ier)
+        call mpi_wait(recv_req_r(i), MPI_STATUS_IGNORE, ier)
 
-        call reduce(R1, R2, QintermedA(i,:,:), QintermedB(i,:,:))
+        call reduce(buff_R(i)%l, buff_R(i)%r, buff_Q(i)%l, buff_Q(i)%r)
 
         if(.not. tree%nodes(i)%is_root) then
-          call mpi_send(R1, n*n, dt, tree%nodes(i)%parent, &
+          call mpi_send(buff_R(i)%l, n*n, dt, tree%nodes(i)%parent, &
             TAG, tree%comm, ier)
         end if
       end do
 
-      deallocate(recv_req1)
-      deallocate(recv_req2)
+      deallocate(recv_req_l)
+      deallocate(recv_req_r)
 
-      allocate(recv_req1(tree%nnodes))
+
       ! backpropagate tree
       ! generate recv request for all nodes
+      allocate(recv_req_l(tree%nnodes))
       do i = tree%nnodes, 1, -1
         if(tree%nodes(i)%is_root) cycle
 
         call mpi_Irecv(Qin, n*n, dt, tree%nodes(i)%parent, &
-          TAG, tree%comm, recv_req1(i), ier)
+          TAG, tree%comm, recv_req_l(i), ier)
       end do
 
       ! recv for leaf
@@ -151,14 +167,14 @@ module tsqr
       if(tree%nnodes .gt. 0) then
         if(tree%nodes(tree%nnodes)%is_root) then
           ! root process needs to send its Q to two children
-          R = R1
-          ! call backpropagate(QintermedA(tree%nnodes,:,:), &
-          !   QintermedB(tree%nnodes,:,:))
+          R = buff_R(tree%nnodes)%l
+          ! call backpropagate(QintermedL(tree%nnodes,:,:), &
+          !   QintermedR(tree%nnodes,:,:))
 
-          call mpi_send(QintermedA(tree%nnodes,:,:), n*n, dt, tree%nodes(tree%nnodes)%s1, &
+          call mpi_send(buff_q(tree%nnodes)%l, n*n, dt, tree%nodes(tree%nnodes)%l, &
             TAG, tree%comm, ier)
 
-          call mpi_send(QintermedB(tree%nnodes,:,:), n*n, dt, tree%nodes(tree%nnodes)%s2, &
+          call mpi_send(buff_q(tree%nnodes)%r, n*n, dt, tree%nodes(tree%nnodes)%r, &
             TAG, tree%comm, ier)
         end if
       end if
@@ -167,37 +183,43 @@ module tsqr
       do i = tree%nnodes, 1, -1
         if(tree%nodes(i)%is_root) cycle
 
-        call mpi_wait(recv_req1(i), MPI_STATUS_IGNORE, ier)
+        call mpi_wait(recv_req_l(i), MPI_STATUS_IGNORE, ier)
 
-        call backpropagate(Qin, QintermedA(i,:,:), QintermedB(i,:,:))
-        call mpi_send(QintermedA(i,:,:), n*n, dt, tree%nodes(i)%s1, &
+        call backpropagate(Qin, buff_q(i)%l, buff_q(i)%r)
+
+        call mpi_send(buff_q(i)%l, n*n, dt, tree%nodes(i)%l, &
           TAG, tree%comm, ier)
 
-        call mpi_send(QintermedB(i,:,:), n*n, dt, tree%nodes(i)%s2, &
+        call mpi_send(buff_q(i)%r, n*n, dt, tree%nodes(i)%r, &
           TAG, tree%comm, ier)
       end do
 
       call mpi_wait(leaf_req, MPI_STATUS_IGNORE, ier)
-      Q = matmul(Q, Qin)
+
+      Q(1:n, 1:n) = Qin(:,:)
+
+      deallocate(buff_R)
+      deallocate(buff_Q)
+      deallocate(recv_req_l)
     end subroutine tsqr_reduction_tree_reduce
 
-    subroutine reduce(R1, R2, Q1, Q2)
-      real(8), intent(inout) :: R1(:,:), R2(:,:)
+    subroutine reduce(Rr, Rl, Q1, Q2)
+      real(8), intent(inout) :: Rr(:,:), Rl(:,:)
       real(8), intent(out) :: Q1(:,:), Q2(:,:)
 
       real(8), allocatable :: R(:,:), tau(:), work(:)
       real(8) :: query(1)
       integer :: m, n, lda, ier, lwork
 
-      n = size(R1, 1)
+      n = size(Rr, 1)
       m = 2*n
 
       lda = m
 
       allocate(R(m,n))
-      !stack R1, R2
-      R(1:n,:) = R1(:,:)
-      R(n+1:,:) = R2(:,:)
+      !stack Rr, Rl
+      R(1:n,:) = Rr(:,:)
+      R(n+1:,:) = Rl(:,:)
 
       allocate(tau(n))
       call dgeqrf(m, n, R, lda, tau, query, -1, ier)
@@ -206,7 +228,7 @@ module tsqr
       allocate(work(lwork))
       call dgeqrf(m, n, R, lda, tau, work, lwork, ier)
 
-      R1(:,:) = R(1:n,:)
+      Rr(:,:) = R(1:n,:)
 
       deallocate(work)
 
