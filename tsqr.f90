@@ -226,8 +226,21 @@ module tsqr
       real(8), intent(in) :: Qi(:,:)
       real(8), intent(inout) :: Qa(:,:), Qb(:,:)
 
-      Qa = matmul(Qa, Qi)
-      Qb = matmul(Qb, Qi)
+      integer :: n
+      real(8), allocatable :: work(:,:)
+
+      n = size(Qi, 2)
+      allocate(work(n,n))
+
+      ! Qa = matmul(Qa, Qi)
+      call dgemm('N', 'N', n, n, n, 1.0d0, Qa, n, Qi, n, 0.0d0, work, n)
+      Qa = work
+
+      ! Qb = matmul(Qb, Qi)
+      call dgemm('N', 'N', n, n, n, 1.0d0, Qb, n, Qi, n, 0.0d0, work, n)
+      Qb = work
+
+      deallocate(work)
     end subroutine backpropagate
 
     subroutine pp_arr(Grid)
