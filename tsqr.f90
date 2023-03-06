@@ -61,6 +61,101 @@ module reduction_tree_m
       end do
     end subroutine binaryReductionTree
 
+    !=========
+    !  Reverse engineer a reduction tree used by MPI_Reduce
+    !=========
+    subroutine mpiReductionTree(comm, tree, root)
+      type(MPI_COMM), intent(in) :: comm
+      type(reduction_tree), intent(out) :: tree
+      integer, intent(in) :: root
+
+      integer, parameter :: TAG = 1107
+      integer :: rnk, sze ! rank and size of comm
+
+      integer :: cnt      ! TAG + cnt will be used as mpi_tag to differentiate messages
+
+      integer :: d1(2), d2(2) ! data buffers during reduction
+
+      type(MPI_OP) :: op
+
+      type(MPI_REQUEST), allocatable :: recv_reqs(:)
+
+
+      cnt = 0
+
+      tree%comm = comm
+
+      call mpi_comm_rank(comm, rnk)
+      call mpi_comm_size(comm, sze)
+
+      allocate(recv_reqs(1))    ! this will frequently be extended
+
+      ! references to members of tree%nodes(i) will be used as buffers
+      !   thus they MUST NEVER change their memory address.
+      ! allocate upper limit so it will never move in memory
+      allocate(tree%nodes(sze))
+      tree%nnodes = 0 ! keep track of actually used nodes
+
+
+      recv_reqs = [recv_reqs, MPI_REQUEST(-1)]
+      call mpi_irecv(tree%parent_of_leaf, 1, MPI_INT, MPI_ANY_SOURCE,&
+        TAG, comm, recv_reqs(Ubound(recv_reqs,1)))
+
+      d1 = [rnk, cnt]
+      d2 = [rnk, cnt]
+
+      call mpi_op_create(foo, .true., op)
+      call mpi_reduce(d1, d2, 2, MPI_INT, op, root, comm)
+
+      if(rnk .eq. root) then
+        call mpi_send(rnk, 1, MPI_INT, rnk, TAG+cnt, comm)
+        if(sze .gt. 1) tree%nodes(tree%nnodes)%is_root = .true.
+      end if
+
+      call mpi_op_free(op)
+      call mpi_waitall(size(recv_reqs), recv_reqs, MPI_STATUSES_IGNORE)
+
+      contains
+
+      ! will need to reference local tree, local recv_reqs, local cnt.
+      !   MUST thus be bound to the outer subroutine to keep
+      !   tree, recv_reqs, cnt in its scope
+      ! bind(c) for it to be used as MPI_Reduce operation
+      subroutine foo(inv, outv, l, t) bind(c)
+        use, intrinsic :: iso_c_binding, only : c_ptr, c_f_pointer
+
+        type(c_ptr), value :: inv, outv
+        integer(c_int) :: l
+        type(MPI_Datatype) :: t
+
+        integer, pointer :: inv_i(:), outv_i(:)
+
+        call c_f_pointer(inv,  inv_i,  [l])
+        call c_f_pointer(outv, outv_i, [l])
+
+        tree%nnodes = 1 + tree%nnodes
+        tree%nodes(tree%nnodes)%l = inv_i(1)
+        tree%nodes(tree%nnodes)%r = outv_i(1)
+        tree%nodes(tree%nnodes)%parent = -1
+        tree%nodes(tree%nnodes)%is_root = .false.
+
+        call mpi_send(rnk, 1, MPI_INT, inv_i(1),  TAG+inv_i(2),  comm)
+        call mpi_send(rnk, 1, MPI_INT, outv_i(1), TAG+outv_i(2), comm)
+
+        recv_reqs = [recv_reqs, MPI_REQUEST(-1)]
+        cnt = 1 + cnt
+
+        call mpi_irecv(tree%nodes(tree%nnodes)%parent, 1, MPI_INT,&
+          MPI_ANY_SOURCE, TAG+cnt, comm, recv_reqs(Ubound(recv_reqs, 1)))
+
+        outv_i(1) = rnk
+        outv_i(2) = cnt
+
+      end subroutine
+
+    end subroutine mpiReductionTree
+
+
 end module reduction_tree_m
 
 
