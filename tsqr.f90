@@ -97,7 +97,6 @@ module reduction_tree_m
       tree%nnodes = 0 ! keep track of actually used nodes
 
 
-      recv_reqs = [recv_reqs, MPI_REQUEST(-1)]
       call mpi_irecv(tree%parent_of_leaf, 1, MPI_INT, MPI_ANY_SOURCE,&
         TAG, comm, recv_reqs(Ubound(recv_reqs,1)))
 
