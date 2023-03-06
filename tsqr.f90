@@ -103,7 +103,7 @@ module reduction_tree_m
       d1 = [rnk, cnt]
       d2 = [rnk, cnt]
 
-      call mpi_op_create(foo, .true., op)
+      call mpi_op_create(insert_node, .true., op)
       call mpi_reduce(d1, d2, 2, MPI_INT, op, root, comm)
 
       if(rnk .eq. root) then
@@ -120,7 +120,7 @@ module reduction_tree_m
       !   MUST thus be bound to the outer subroutine to keep
       !   tree, recv_reqs, cnt in its scope
       ! bind(c) for it to be used as MPI_Reduce operation
-      subroutine foo(inv, outv, l, t) bind(c)
+      subroutine insert_node(inv, outv, l, t) bind(c)
         use, intrinsic :: iso_c_binding, only : c_ptr, c_f_pointer
 
         type(c_ptr), value :: inv, outv
