@@ -269,6 +269,8 @@ module tsqr
       type(packed_buffer), allocatable :: buff_Q(:)
       type(packed_buffer), allocatable :: buff_R(:)
 
+      real(8), allocatable :: Q_leaf_buffer(:)
+
       type(mpi_request), allocatable :: recv_req_l(:), recv_req_r(:)
       type(mpi_request) :: leaf_req
 
@@ -277,6 +279,9 @@ module tsqr
       integer :: s
 
       s = (n * n + n) / 2 ! use integer division, always even
+
+      allocate(Q_leaf_buffer(s))
+      Q_leaf_buffer = 0.0d0
 
       allocate(buff_R(tree%nnodes))
       allocate(buff_Q(tree%nnodes))
@@ -299,8 +304,6 @@ module tsqr
       allocate(recv_req_r(tree%nnodes))
 
       Q_p  = 0.0d0
-
-      ! forall (i=1:min(m,n)) Qin(i,i) = 1.0d0
 
       ! recurse tree
       ! generate recv request for all nodes
@@ -341,12 +344,12 @@ module tsqr
       do i = tree%nnodes, 1, -1
         if(tree%nodes(i)%is_root) cycle
 
-        call mpi_Irecv(Q_p, s, dt, tree%nodes(i)%parent, &
+        call mpi_Irecv(buff_R(i)%l, s, dt, tree%nodes(i)%parent, &
           TAG, tree%comm, recv_req_l(i), ier)
       end do
 
       ! recv for leaf
-      call mpi_Irecv(Q_p, s, dt, tree%parent_of_leaf, &
+      call mpi_Irecv(Q_leaf_buffer, s, dt, tree%parent_of_leaf, &
         TAG, tree%comm, leaf_req, ier)
 
       if(tree%nnodes .gt. 0) then
@@ -369,7 +372,7 @@ module tsqr
 
         call mpi_wait(recv_req_l(i), MPI_STATUS_IGNORE, ier)
 
-        call backpropagate(Q_p, buff_Q(i)%l, buff_Q(i)%r, n)
+        call backpropagate(buff_R(i)%l, buff_Q(i)%l, buff_Q(i)%r, n)
 
         call mpi_send(buff_Q(i)%l, s, dt, tree%nodes(i)%l, &
           TAG, tree%comm, ier)
@@ -380,6 +383,12 @@ module tsqr
 
       call mpi_wait(leaf_req, MPI_STATUS_IGNORE, ier)
       call mpi_bcast(R_p, s, MPI_REAL8, 0, tree%comm, ier)
+
+      ! Q_leaf_buffer has asynchronous attribute,
+      !  but has been awaitet above.
+      ! To satisfy the compiler, values must be copied to matrix
+      !  without asynchronous attribute
+      Q_p = Q_leaf_buffer
 
 
       deallocate(buff_R)
@@ -397,7 +406,6 @@ module tsqr
       real(8), allocatable :: R(:,:), tau(:), work(:)
       real(8) :: query(1)
       integer :: m, lda, ier, lwork
-      integer :: i, j, l
 
       m = 2*n
 
@@ -407,14 +415,8 @@ module tsqr
 
       ! stack packed Rl, Rr
       R = 0.0d0
-      l = 1
-      do j = 1, n
-        do i = 1, j
-          R(i  ,j)  = Rl(l)
-          R(i+n, j) = Rr(l)
-          l = l + 1
-        end do
-      end do
+      call dtpttr('U', n, Rl, R, lda, ier)
+      call dtpttr('U', n, Rr, R(n+1:, 1:n), n, ier)
 
       allocate(tau(n))
       call dgeqrf(m, n, R, lda, tau, query, -1, ier)
@@ -424,27 +426,18 @@ module tsqr
       call dgeqrf(m, n, R, lda, tau, work, lwork, ier)
 
       ! recover new upper triag as packed
-      l = 1
-      do j = 1, n
-        do i = 1, j
-          Rl(l) = R(i,j)
-          l = l+1
-        end do
-      end do
+      call dtrttp('U', n, R, m, Rl, ier)
 
       deallocate(work)
 
-      allocate(work(n))
-      call dorg2r(m, n, n, R, m, tau, work, ier)
+      ! call dorg2r(m, n, n, R, m, tau, work, ier) ! unblocked
+      call dorgqr(m, n, n, R, m, tau, query, -1, ier)
+      lwork = int(query(1))
+      allocate(work(lwork))
+      call dorgqr(m, n, n, R, m, tau, work, lwork, ier) ! blocked
 
-      l = 1
-      do j = 1, n
-        do i = 1, j
-          Q1(l) = R(i  ,j)
-          Q2(l) = R(i+n,j)
-          l = l+1
-        end do
-      end do
+      call dtrttp('U', n, R, m, Q1, ier)
+      call dtrttp('U', n, R(n+1:,1:n), n, Q2, ier)
 
       deallocate(R)
       deallocate(tau)
