@@ -119,8 +119,7 @@ module reduction_tree_m
       ! will need to reference local tree, local recv_reqs, local cnt.
       !   MUST thus be bound to the outer subroutine to keep
       !   tree, recv_reqs, cnt in its scope
-      ! bind(c) for it to be used as MPI_Reduce operation
-      subroutine insert_node(inv, outv, l, t) bind(c)
+      subroutine insert_node(inv, outv, l, t)
         use, intrinsic :: iso_c_binding, only : c_ptr, c_f_pointer
 
         type(c_ptr), value :: inv, outv
