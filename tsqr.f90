@@ -174,10 +174,88 @@ module tsqr
     real(8), allocatable :: r(:,:)
   end type dense_buffer
 
-  integer :: rnk
-
-
   contains
+
+    subroutine tsqr_qr(Q, R, tree)
+      real(8), intent(inout) :: Q(:,:)
+      real(8), intent(out)   :: R(:,:)
+      type(reduction_tree), intent(in) :: tree
+
+      real(8), allocatable :: tau(:)
+      real(8), allocatable :: R_p(:), Qred_p(:), Qred(:,:)
+      integer :: m, n, s
+
+      integer :: lwork, ier
+      real(8) :: query(1)
+      real(8), allocatable :: work(:)
+
+
+      m = size(Q, 1)
+      n = size(Q, 2)
+      s = (n*n+n) / 2
+
+      allocate(tau(n))
+      allocate(R_p(s))
+      allocate(Qred_p(s))
+      allocate(Qred(m,n))
+      Qred = 0.0d0
+      Qred_p = 0.0d0
+      R_p = 0.0d0
+      tau = 0.0d0
+
+      ! compute local Q, R
+      ! Q is overwritten by householder reflectors
+      ! R_p contains packed upper triag R
+      call qr_local(Q, R_p, tau)
+
+      ! compute local Qs for global R
+      call tsqr_reduction_tree_reduce(Qred_p, R_p, n, tree)
+      call dtpttr('U', n, R_p, R, n, ier)
+      call dtpttr('U', n, Qred_p, Qred(1:n, 1:n), n, ier)
+
+      ! apply householder reflectors
+      ! TODO: save memory by doing this in situ
+      call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, query, -1, ier)
+      lwork = int(query(1))
+      allocate(work(lwork))
+      call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, work, lwork, ier)
+      deallocate(work)
+
+      Q(:,:) = Qred(:,:)
+
+      deallocate(Qred_p)
+      deallocate(Qred)
+      deallocate(R_p)
+      deallocate(tau)
+
+    end subroutine tsqr_qr
+
+    subroutine qr_local(A, R_p, tau)
+      real(8), intent(inout) :: A(:,:), R_p(:)
+      real(8), intent(out) :: tau(:)
+
+      integer :: mA, nA, lda, ier, lwork
+      real(8), allocatable :: work(:)
+      real(8) :: query(1)
+
+      mA = size(A, 1)
+      nA = size(A, 2)
+      lda = mA
+
+      call dgeqrf(mA, nA, A, lda, tau, query, -1, ier)
+      lwork = int(query(1))
+
+      allocate(work(lwork))
+      call dgeqrf(mA, nA, A, lda, tau, work, lwork, ier)
+      deallocate(work)
+
+      R_p = 0.0d0
+      call dtrttp('U', nA, A(1:nA, 1:nA), nA, R_p, ier)
+
+
+    end subroutine qr_local
+
+
     subroutine tsqr_reduction_tree_reduce(Q_p, R_p, n, tree)
       real(8), intent(out)   :: Q_p(:)
       real(8), intent(inout) :: R_p(:)
@@ -418,8 +496,10 @@ module tsqr
       integer :: ier
 
       allocate(Grid(n,n))
+      Grid = 0.0d0
       call dtpttr('U', n, P, Grid, n, ier)
       call pp_arr(Grid)
+      deallocate(Grid)
     end subroutine
     subroutine pp_arr(Grid)
       real(8), intent(in) :: Grid(:,:)
