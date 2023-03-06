@@ -178,16 +178,15 @@ module tsqr
 
 
   contains
-    subroutine tsqr_reduction_tree_reduce(Q, R, tree)
-      real(8), intent(out)   :: Q(:,:)
-      real(8), intent(inout) :: R(:,:)
+    subroutine tsqr_reduction_tree_reduce(Q_p, R_p, n, tree)
+      real(8), intent(out)   :: Q_p(:)
+      real(8), intent(inout) :: R_p(:)
+      integer, intent(in)    :: n
       type(reduction_tree), intent(in) :: tree
 
       integer,            parameter :: TAG = 4733
       type(MPI_DATATYPE), parameter :: dt  = MPI_REAL8
 
-      real(8), allocatable :: Qin(:) ! packed upper triag
-      real(8), allocatable :: R_packed(:)
 
       type(packed_buffer), allocatable :: buff_Q(:)
       type(packed_buffer), allocatable :: buff_R(:)
@@ -195,14 +194,10 @@ module tsqr
       type(mpi_request), allocatable :: recv_req_l(:), recv_req_r(:)
       type(mpi_request) :: leaf_req
 
-      integer :: i, j, k, l
+      integer :: i
       integer :: ier
-      integer :: m, n
       integer :: s
 
-      call mpi_comm_rank(MPI_COMM_WORLD, rnk)
-      m = size(Q, 1)
-      n = size(Q, 2)
       s = (n * n + n) / 2 ! use integer division, always even
 
       allocate(buff_R(tree%nnodes))
@@ -225,21 +220,9 @@ module tsqr
       allocate(recv_req_l(tree%nnodes))
       allocate(recv_req_r(tree%nnodes))
 
-      allocate(Qin(s))
-
-      Q    = 0.0d0
-      Qin  = 0.0d0
+      Q_p  = 0.0d0
 
       ! forall (i=1:min(m,n)) Qin(i,i) = 1.0d0
-
-      allocate(R_packed(s))
-      l = 1
-      do j = 1, n
-        do i = 1, j
-          R_packed(l) = R(i,j)
-          l = l + 1
-        end do
-      end do
 
       ! recurse tree
       ! generate recv request for all nodes
@@ -254,7 +237,7 @@ module tsqr
       end do
 
       ! send data to parent. Might be self
-      call mpi_send(R_packed, s, dt, tree%parent_of_leaf, &
+      call mpi_send(R_p, s, dt, tree%parent_of_leaf, &
         TAG, tree%comm, ier)
 
       ! actual reduce op
@@ -280,19 +263,19 @@ module tsqr
       do i = tree%nnodes, 1, -1
         if(tree%nodes(i)%is_root) cycle
 
-        call mpi_Irecv(Qin, s, dt, tree%nodes(i)%parent, &
+        call mpi_Irecv(Q_p, s, dt, tree%nodes(i)%parent, &
           TAG, tree%comm, recv_req_l(i), ier)
       end do
 
       ! recv for leaf
-      call mpi_Irecv(Qin, s, dt, tree%parent_of_leaf, &
+      call mpi_Irecv(Q_p, s, dt, tree%parent_of_leaf, &
         TAG, tree%comm, leaf_req, ier)
 
       if(tree%nnodes .gt. 0) then
         if(tree%nodes(tree%nnodes)%is_root) then
           ! root contains global R
-          R_packed = buff_R(tree%nnodes)%l
-          ! call mpi_bcast(R_packed, s, dt, 0, tree%comm, ier)
+          R_p = buff_R(tree%nnodes)%l
+          ! call mpi_bcast(R_p, s, dt, 0, tree%comm, ier)
 
           call mpi_send(buff_Q(tree%nnodes)%l, s, dt, tree%nodes(tree%nnodes)%l, &
             TAG, tree%comm, ier)
@@ -308,7 +291,7 @@ module tsqr
 
         call mpi_wait(recv_req_l(i), MPI_STATUS_IGNORE, ier)
 
-        call backpropagate(Qin, buff_Q(i)%l, buff_Q(i)%r, n)
+        call backpropagate(Q_p, buff_Q(i)%l, buff_Q(i)%r, n)
 
         call mpi_send(buff_Q(i)%l, s, dt, tree%nodes(i)%l, &
           TAG, tree%comm, ier)
@@ -318,10 +301,8 @@ module tsqr
       end do
 
       call mpi_wait(leaf_req, MPI_STATUS_IGNORE, ier)
+      call mpi_bcast(R_p, s, MPI_REAL8, 0, tree%comm, ier)
 
-      Q = 0.0d0
-      call dtpttr('U', n, Qin, Q(1:n, 1:n), n, ier)
-      call dtpttr('U', n, R_packed, R, n, ier)
 
       deallocate(buff_R)
       deallocate(buff_Q)
