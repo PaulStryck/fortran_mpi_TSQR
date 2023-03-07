@@ -213,29 +213,31 @@ module tsqr
       ! compute local Q, R
       ! Q is overwritten by householder reflectors
       ! R_p contains packed upper triag R
-      call cpu_time(tic)
+      tic = mpi_wtime()
       call qr_local(Q, R_p, tau)
-      call cpu_time(toc)
+      toc = mpi_wtime()
       if(onmainl) write(*,*) "local qr:", toc - tic
 
       ! compute local Qs for global R
-      call cpu_time(tic)
+      tic = mpi_wtime()
       call tsqr_reduction_tree_reduce(Qred_p, R_p, n, tree)
       call dtpttr('U', n, R_p, R, n, ier)
-      call cpu_time(toc)
+      toc = mpi_wtime()
       if(onmainl) write(*,*) "comm:", toc - tic
 
       ! apply householder reflectors
-      call cpu_time(tic)
-      if(.true.) then
-        ! if enough memory for Qred use super fast dormqr
-        allocate(Qred(m,n))
-        Qred = 0.0d0
+      tic = mpi_wtime()
+
+      if(.false.) then
+        ! if enough memory for Qred use fast dormqr
+        !   this is faster when not using compiler optimizations,
+        !   as this calls directly into LAPACK which is usually highly optimized
+        allocate(Qred(m,n), source=0.0d0)
         call dtpttr('U', n, Qred_p, Qred(1:n, 1:n), n, ier)
 
         call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, query1, -1, ier)
         lwork1 = int(query1(1))
-        allocate(work1(lwork1))
+        allocate(work1(lwork1), source=0.0d0)
         call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, work1, lwork1, ier)
         deallocate(work1)
 
@@ -243,10 +245,10 @@ module tsqr
 
         deallocate(Qred)
       else
-        ! if not enough memory, use slower inplace
-        !   speed depends on compiler optimization
-        !   but usally 4-5x slower than above method
-        !   approx 2x slower with SIMD optimization, eg -xHost, or -fast with ifort
+        ! significantly faster to use custom in_place dormqr
+        !   custom implementation O(n^2) instead of O(nm)
+        !   beneficial as n << m
+        ! however, significant gains only with high opt level in compiler
         call dtpttr('U', n, Qred_p, Q, m, ier)
 
         call dormqr_inplace('L', 'N', m, n, n, Q, m, tau, query1, -1, query2, -1, ier)
@@ -259,7 +261,7 @@ module tsqr
         deallocate(work1)
         deallocate(work2)
       end if
-      call cpu_time(toc)
+      toc = mpi_wtime()
       if(onmainl) write(*,*) "loc -> glob:", toc - tic
 
       deallocate(Qred_p)
