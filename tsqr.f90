@@ -231,6 +231,7 @@ module tsqr
         ! if not enough memory, use slower inplace
         !   speed depends on compiler optimization
         !   but usally 4-5x slower than above method
+        !   approx 2x slower with SIMD optimization, eg -xHost, or -fast with ifort
         call dtpttr('U', n, Qred_p, Q, m, ier)
 
         call dormqr_inplace('L', 'N', m, n, n, Q, m, tau, query1, -1, query2, -1, ier)
