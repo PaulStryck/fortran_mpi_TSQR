@@ -128,6 +128,8 @@ module reduction_tree_m
 
         integer, pointer :: inv_i(:), outv_i(:)
 
+        if(.not. t .eq. MPI_INT) RETURN
+
         call c_f_pointer(inv,  inv_i,  [l])
         call c_f_pointer(outv, outv_i, [l])
 
