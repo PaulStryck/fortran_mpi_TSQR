@@ -162,6 +162,7 @@ module tsqr
 
   implicit none
 
+  private
   ! only ever needs to hold triangular matrices.
   !  thus use packed storage
   type packed_buffer
@@ -169,13 +170,10 @@ module tsqr
     real(8), allocatable :: r(:)
   end type packed_buffer
 
-  type dense_buffer
-    real(8), allocatable :: l(:,:)
-    real(8), allocatable :: r(:,:)
-  end type dense_buffer
-
   integer :: rnk
   logical :: onmainl
+
+  public tsqr_qr
 
   contains
 
@@ -218,7 +216,7 @@ module tsqr
       toc = mpi_wtime()
       if(onmainl) write(*,*) "local qr:", toc - tic
 
-      ! compute local Qs for global R
+      ! compute global R and local Qs for global R
       tic = mpi_wtime()
       call tsqr_reduction_tree_reduce(Qred_p, R_p, n, tree)
       call dtpttr('U', n, R_p, R, n, ier)
@@ -271,140 +269,11 @@ module tsqr
     end subroutine tsqr_qr
 
 
-    subroutine dormqr_inplace(SIDE, TRANS, M, N, K, A, LDA, TAU, &
-        WORK, LWORK, WORK2, LWORK2, INFO)
-      ! .. Scalar Arguments ..
-      character :: side, trans
-      integer   :: info, k, lda, lwork, lwork2, m, n
-
-      ! .. Array Arguments ..
-      real(8) :: A(lda, *), tau(*), work(*),  WORK2(lda, lwork2)
-
-      ! ====================================
-      ! .. Parameters ..
-      integer, parameter :: nbmax = 64
-      integer, parameter :: ldt = nbmax + 1
-      integer, parameter :: tsize = ldt * nbmax
-
-      ! .. Local Scalars ..
-      logical :: left, lquery, notran
-      integer :: i, i1, i2, i3, ib, ic, iwt, jc, ldwork, &
-        lwkopt, mi, nb, nbmin, ni, nq, nw, ii
-
-      ! .. External Functions ..
-      logical LSAME
-      integer ILAENV
-      external lsame, ilaenv
-
-      ! .. External Subroutines ..
-      external dlarfb, dlarft, dorm2r, xerbla
-
-      ! .. intrinsic functions ..
-      intrinsic max, min
-
-      ! .. Executable Statements ..
-      ! Test the input arguments
-      info = 0
-      left = lsame(side, 'L')
-      notran = lsame(trans, 'N')
-      lquery = lwork .eq. -1
-
-      IF( left ) THEN
-        nq = m
-        nw = max( 1, n )
-      END IF
-
-      IF( .NOT.left ) THEN
-        info = -1
-      ELSE IF( .NOT.notran ) THEN
-        info = -2
-      ELSE IF( m.LT.0 ) THEN
-        info = -3
-      ELSE IF( n.LT.0 ) THEN
-        info = -4
-      ELSE IF( k.LT.0 .OR. k.GT.n ) THEN
-        info = -5
-      ELSE IF( lda.LT.max( 1, nq ) ) THEN
-        info = -7
-      ELSE IF( lwork.LT.nw .AND. .NOT.lquery ) THEN
-        info = -12
-      END IF
-
-      IF( info.EQ.0 ) THEN
-        ! Compute the workspace requirements
-        nb = min( nbmax, ilaenv( 1, 'DORMQR', side // trans, m, n, k, -1 ) )
-        lwkopt = nw*nb + tsize
-        work( 1 )    = lwkopt
-        work2( 1,1 ) = nb
-      END IF
-
-      IF( info.NE.0 ) THEN
-        CALL xerbla( 'DORMQR', -info )
-        RETURN
-      ELSE IF( lquery ) THEN
-        RETURN
-      END IF
-
-      ! quick return if possible
-      IF( m.EQ.0 .OR. n.EQ.0 .OR. k.EQ.0 ) THEN
-        work( 1 ) = 1
-        work2( 1,1 ) = 1
-        RETURN
-      END IF
-
-      nbmin = 2
-      ldwork = nw
-      IF( nb.GT.1 .AND. nb.LT.k ) THEN
-        IF( lwork.LT.lwkopt .OR. lwork2.lt.nb) THEN
-          nb = min(lwork, (lwork-tsize) / ldwork)
-          nbmin = max( 2, ilaenv( 2, 'DORMQR', side // trans, m, n, k, -1 ) )
-        END IF
-      END IF
-
-      IF( nb.LT.nbmin .OR. nb.GE.k ) THEN
-        ! Use unblocked code
-        write(*,*) "TODO nb: ", nb, nbmin, k
-        ! CALL dorm2r( side, trans, m, n, k, a, lda, tau, c, ldc, work, iinfo )
-      ELSE
-        ! Use blocked code
-        iwt = 1 + nw*nb
-
-        i1 = ( ( k-1 ) / nb )*nb + 1
-        i2 = 1
-        i3 = -nb
-
-        ni = n
-        jc = 1
-
-        DO i = i1, i2, i3
-          ib = min( nb, k-i+1)
-
-          call dlarft( 'Forward', 'Columnwise', nq-i+1, ib, a( i, i ),&
-            lda, tau(i), work(iwt), ldt)
-          ! copy block reflector to be used by dlarfb
-          work2 = 0.0d0
-          work2(1:lda, 1:ib) = a(1:lda, i:i+ib-1)
-
-          ! zero out used reflector elements
-          do ii = i,i+ib-1
-              a( ii+1:m,ii ) = 0.0d0
-          end do
-
-          ! H is applied to C(i:m,1:n)
-          mi = m - i + 1
-          ic = i
-
-          ! Apply H
-          CALL dlarfb( side, trans, 'Forward', 'Columnwise', mi, n-ic+1, &
-            ib, work2(i,1), lda, work( iwt ), ldt, &
-            a( ic, ic ), lda, work, ldwork )
-        END DO
-      END IF
-      work(1) = lwkopt
-      work2( 1,1) = nb
-      RETURN
-    end subroutine
-
+    !=========
+    ! Helper function to compute a full QR factorization of local matrix A
+    ! A = QR
+    ! Q is implicitly stored in A and tau as Householder reflectors given by DGEQRF
+    ! R_p contains the R factor in packed format.
     subroutine qr_local(A, R_p, tau)
       real(8), intent(inout) :: A(:,:), R_p(:)
       real(8), intent(out) :: tau(:)
@@ -427,10 +296,21 @@ module tsqr
       R_p = 0.0d0
       call dtrttp('U', nA, A(1:nA, 1:nA), nA, R_p, ier)
 
-
     end subroutine qr_local
 
 
+    !==========
+    ! Intermediate part of TSQR
+    ! R_p must be an n x n, processor local, R factor of a
+    !   QR factorization
+    ! This function computes the global R factor and all
+    !   intermediate Q factors which will be processor local
+    ! The intermediate Q factor is n x n,  upper triangular,
+    !   allowing for packed storage
+    !
+    ! A reduction tree must be explicitly given, as this needs
+    !   to be traversed in both direction, which MPI does not do
+    !   out of the box.
     subroutine tsqr_reduction_tree_reduce(Q_p, R_p, n, tree)
       real(8), intent(out)   :: Q_p(:)
       real(8), intent(inout) :: R_p(:)
@@ -455,24 +335,27 @@ module tsqr
 
       s = (n * n + n) / 2 ! use integer division, always even
 
-      allocate(Q_leaf_buffer(s))
-      Q_leaf_buffer = 0.0d0
+      allocate(Q_leaf_buffer(s), source=0.0d0)  ! buffer for final Q factor
 
+      ! Each node must buffer the incoming R factors from two other nodes
+      !   Additionally each node must store the explicit Q factors for
+      !   For both chil nodes until the tree has been backpropagated.
+      ! This size of Q buffer is actually needed.
+      ! The size of the R buffer is overkill, could be reduced to size 2
+      !   with rolling buffer and locks. But complicated to code in fortran.
+      !   Thus its done in this way.
+      ! Elements in buff_R will be used as mpi_irecv buffers, and can thus be
+      !  accessed concurrently by mpi. To prevent mpi to write into a buffer
+      !  from which this program currently reads, each node gets its own buffer.
       allocate(buff_R(tree%nnodes))
       allocate(buff_Q(tree%nnodes))
 
       do i = 1, tree%nnodes
-        allocate(buff_R(i)%l(s))
-        allocate(buff_R(i)%r(s))
+        allocate(buff_R(i)%l(s), source=0.0d0)
+        allocate(buff_R(i)%r(s), source=0.0d0)
 
-        allocate(buff_Q(i)%l(s))
-        allocate(buff_Q(i)%r(s))
-
-        buff_R(i)%l = 0.0d0
-        buff_R(i)%r = 0.0d0
-
-        buff_Q(i)%l = 0.0d0
-        buff_Q(i)%r = 0.0d0
+        allocate(buff_Q(i)%l(s), source=0.0d0)
+        allocate(buff_Q(i)%r(s), source=0.0d0)
       end do
 
       allocate(recv_req_l(tree%nnodes))
@@ -557,7 +440,7 @@ module tsqr
       end do
 
       call mpi_wait(leaf_req, MPI_STATUS_IGNORE, ier)
-      call mpi_bcast(R_p, s, MPI_REAL8, 0, tree%comm, ier)
+      call mpi_bcast(R_p, s, dt, 0, tree%comm, ier)
 
       ! Q_leaf_buffer has asynchronous attribute,
       !  but has been awaitet above.
@@ -571,10 +454,27 @@ module tsqr
       deallocate(recv_req_l)
     end subroutine tsqr_reduction_tree_reduce
 
-    subroutine reduce(Rl, Rr, Q1, Q2, n)
+
+    !=========
+    ! Compute a QR factorization of two stacked n x n upper
+    !   triangular matrices Rl, Rr
+    ! QR = (Rl)
+    !      (Rr)
+    !
+    ! Due to this special form, the Q factor is again
+    ! given by two stacked n x n upper triangular matrices
+    ! Q = (Ql)
+    !     (Qr)
+    !
+    ! Rl: on input:  the upper part of the stacked matrix (packed)
+    !     on output: the resulting R factor (packed)
+    ! Rr: on input:  the lower part of the stacked matrix (packed)
+    !
+    ! Ql, Qr: on output: resulting parts of the Q factors
+    subroutine reduce(Rl, Rr, Ql, Qr, n)
       real(8), intent(inout) :: Rl(:) ! packed upper triag
       real(8), intent(in)    :: Rr(:) ! packed upper triag
-      real(8), intent(out)   :: Q1(:), Q2(:) ! packed upper triag
+      real(8), intent(out)   :: Ql(:), Qr(:) ! packed upper triag
 
       integer, intent(in)    :: n
 
@@ -611,8 +511,8 @@ module tsqr
       allocate(work(lwork))
       call dorgqr(m, n, n, R, m, tau, work, lwork, ier) ! blocked
 
-      call dtrttp('U', n, R, m, Q1, ier)
-      call dtrttp('U', n, R(n+1:,1:n), n, Q2, ier)
+      call dtrttp('U', n, R, m, Ql, ier)
+      call dtrttp('U', n, R(n+1:,1:n), n, Qr, ier)
 
       deallocate(R)
       deallocate(tau)
@@ -620,6 +520,12 @@ module tsqr
 
     end subroutine reduce
 
+    !=======
+    ! Right multiplication of packed upper tringular
+    !   n x n matrices Qa and Qb with Qi
+    !
+    ! Qa will be overwritten by Qa * Qi
+    ! Qb will be overwritten by Qb * Qi
     subroutine backpropagate(Qi, Qa, Qb, n)
       real(8), intent(in)    :: Qi(:)        ! packed upper triag
       real(8), intent(inout) :: Qa(:), Qb(:) ! packed upper triag
@@ -629,54 +535,173 @@ module tsqr
 
       real(8), allocatable :: A(:,:), B(:,:)
 
-      allocate(A(n,n))
-      allocate(B(n,n))
-      A = 0.0d0
-      B = 0.0d0
+      allocate(A(n,n), source=0.0d0)
+      allocate(B(n,n), source=0.0d0)
 
       ! expand Qi from packed to square
       call dtpttr('U', n, Qi, A, n, ier)
 
       ! Qa = matmul(Qa, Qi)
-      B = 0.0d0
-      call dtpttr('U', n, Qa, B, n, ier)
-      call dtrmm('R', 'U', 'N', 'N', n, n, 1.0d0, A, n, B, n)
-      call dtrttp('U', n, B, n, Qa, ier)
-      ! call dgemm('N', 'N', n, n, n, 1.0d0, Qa, n, Qi, n, 0.0d0, work, n)
-      ! Qa = work
+      call dtpttr('U', n, Qa, B, n, ier) ! expand Qa from packed to square
+      call dtrmm('R', 'U', 'N', 'N', n, n, 1.0d0, A, n, B, n) ! triangular matmul
+      call dtrttp('U', n, B, n, Qa, ier) ! pack square result to upper triag
 
       ! Qb = matmul(Qb, Qi)
-      B = 0.0d0
-      call dtpttr('U', n, Qb, B, n, ier)
-      call dtrmm('R', 'U', 'N', 'N', n, n, 1.0d0, A, n, B, n)
-      call dtrttp('U', n, B, n, Qb, ier)
-      ! call dgemm('N', 'N', n, n, n, 1.0d0, Qb, n, Qi, n, 0.0d0, work, n)
-      ! Qb = work
+      call dtpttr('U', n, Qb, B, n, ier) ! expand Qb from packed to square
+      call dtrmm('R', 'U', 'N', 'N', n, n, 1.0d0, A, n, B, n) ! triangular matmul
+      call dtrttp('U', n, B, n, Qb, ier) ! pack square result to upper triag
 
       deallocate(A)
       deallocate(B)
     end subroutine backpropagate
 
-    subroutine pp_arr_p(P, n)
-      real(8), intent(in) :: P(:)
-      integer, intent(in) :: n
-      real(8), allocatable :: Grid(:,:)
-      integer :: ier
+    !==========
+    ! Reimplementation of LAPACKs DORMQR but to work with triangular
+    !   matrices and in-place
+    ! Computes Q * A
+    !
+    ! Where A is upper triangular, NxN
+    !   Q is MxN but given as K Householder reflectors as returned by DGEQRF,
+    !   in conjunction with TAU.
+    ! This allows Q and A to be stored in the same MxN matrix.
+    ! Q is overwritten in this process by Q * A.
+    !
+    ! Due to the in-place computation, the memory footprint is
+    !   drastically reduced.
+    ! For m x n matrices with n << m, this yields significant performance increase
+    ! TODO: does not yet work when resorting to unblocked version.
+    !   It is undesireable to use unblocked version, anyway!
+    subroutine dormqr_inplace(SIDE, TRANS, M, N, K, A, LDA, TAU, &
+        WORK, LWORK, WORK2, LWORK2, INFO)
+      ! .. Scalar Arguments ..
+      character :: side, trans
+      integer   :: info, k, lda, lwork, lwork2, m, n
 
-      allocate(Grid(n,n))
-      Grid = 0.0d0
-      call dtpttr('U', n, P, Grid, n, ier)
-      call pp_arr(Grid)
-      deallocate(Grid)
+      ! .. Array Arguments ..
+      real(8) :: A(lda, *), tau(*), work(*),  WORK2(lda, lwork2)
+
+      ! ====================================
+      ! .. Parameters ..
+      integer, parameter :: nbmax = 64
+      integer, parameter :: ldt = nbmax + 1
+      integer, parameter :: tsize = ldt * nbmax
+
+      ! .. Local Scalars ..
+      logical :: left, lquery, notran
+      integer :: i, i1, i2, i3, ib, ic, iwt, jc, ldwork, &
+        lwkopt, mi, nb, nbmin, ni, nq, nw, ii
+
+      ! .. External Functions ..
+      logical LSAME
+      integer ILAENV
+      external lsame, ilaenv
+
+      ! .. External Subroutines ..
+      external dlarfb, dlarft, dorm2r, xerbla
+
+      ! .. intrinsic functions ..
+      intrinsic max, min
+
+      ! .. Executable Statements ..
+      ! Test the input arguments
+      info = 0
+      left = lsame(side, 'L')
+      notran = lsame(trans, 'N')
+      lquery = lwork .eq. -1
+
+      IF( left ) THEN
+        nq = m
+        nw = max( 1, n )
+      END IF
+
+      IF( .NOT.left ) THEN
+        info = -1
+      ELSE IF( .NOT.notran ) THEN
+        info = -2
+      ELSE IF( m.LT.0 ) THEN
+        info = -3
+      ELSE IF( n.LT.0 ) THEN
+        info = -4
+      ELSE IF( k.LT.0 .OR. k.GT.n ) THEN
+        info = -5
+      ELSE IF( lda.LT.max( 1, nq ) ) THEN
+        info = -7
+      ELSE IF( lwork.LT.nw .AND. .NOT.lquery ) THEN
+        info = -12
+      END IF
+
+      IF( info.EQ.0 ) THEN
+        ! Compute the workspace requirements
+        nb = min( nbmax, ilaenv( 1, 'DORMQR', side // trans, n, n, k, -1 ) )
+        lwkopt = nw*nb + tsize
+        work( 1 )    = lwkopt
+        work2( 1,1 ) = nb
+      END IF
+
+      IF( info.NE.0 ) THEN
+        CALL xerbla( 'DORMQR', -info )
+        RETURN
+      ELSE IF( lquery ) THEN
+        RETURN
+      END IF
+
+      ! quick return if possible
+      IF( m.EQ.0 .OR. n.EQ.0 .OR. k.EQ.0 ) THEN
+        work( 1 ) = 1
+        work2( 1,1 ) = 1
+        RETURN
+      END IF
+
+      nbmin = 2
+      ldwork = nw
+      IF( nb.GT.1 .AND. nb.LT.k ) THEN
+        IF( lwork.LT.lwkopt .OR. lwork2.lt.nb) THEN
+          nb = min(lwork2, (lwork-tsize) / ldwork)
+          nbmin = max( 2, ilaenv( 2, 'DORMQR', side // trans, n, n, k, -1 ) )
+        END IF
+      END IF
+
+      IF( nb.LT.nbmin .OR. nb.GE.k ) THEN
+        ! Use unblocked code
+        write(*,*) "TODO nb: ", nb, nbmin, k
+        ! CALL dorm2r( side, trans, m, n, k, a, lda, tau, c, ldc, work, iinfo )
+      ELSE
+        ! Use blocked code
+        iwt = 1 + nw*nb
+
+        i1 = ( ( k-1 ) / nb )*nb + 1
+        i2 = 1
+        i3 = -nb
+
+        ni = n
+        jc = 1
+
+        DO i = i1, i2, i3
+          ib = min( nb, k-i+1)
+
+          call dlarft( 'Forward', 'Columnwise', nq-i+1, ib, a( i, i ),&
+            lda, tau(i), work(iwt), ldt)
+          ! copy block reflector to be used by dlarfb
+          work2 = 0.0d0
+          work2(1:lda, 1:ib) = a(1:lda, i:i+ib-1)
+
+          ! zero out used reflector elements
+          do ii = i,i+ib-1
+              a( ii+1:m,ii ) = 0.0d0
+          end do
+
+          ! H is applied to C(i:m,1:n)
+          mi = m - i + 1
+          ic = i
+
+          ! Apply H
+          CALL dlarfb( side, trans, 'Forward', 'Columnwise', mi, n-ic+1, &
+            ib, work2(i,1), lda, work( iwt ), ldt, &
+            a( ic, ic ), lda, work, ldwork )
+        END DO
+      END IF
+      work(1) = lwkopt
+      work2( 1,1) = nb
+      RETURN
     end subroutine
-    subroutine pp_arr(Grid)
-      real(8), intent(in) :: Grid(:,:)
-
-      integer :: i,j, n,m
-      n = size(Grid, 1)
-      m = size(Grid, 2)
-
-      write( * , "(*(g0.4))" ) ( (Grid(i,j)," ",j=1,m), new_line("A"), i=1,n)
-    end subroutine
-
 end module tsqr
