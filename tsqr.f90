@@ -185,9 +185,9 @@ module tsqr
       real(8), allocatable :: R_p(:), Qred_p(:), Qred(:,:)
       integer :: m, n, s
 
-      integer :: lwork, ier
-      real(8) :: query(1)
-      real(8), allocatable :: work(:)
+      integer :: lwork1, lwork2, ier
+      real(8) :: query1(1), query2(1,1)
+      real(8), allocatable :: work1(:), work2(:,:)
 
 
       m = size(Q, 1)
@@ -197,8 +197,7 @@ module tsqr
       allocate(tau(n))
       allocate(R_p(s))
       allocate(Qred_p(s))
-      allocate(Qred(m,n))
-      Qred = 0.0d0
+
       Qred_p = 0.0d0
       R_p = 0.0d0
       tau = 0.0d0
@@ -211,24 +210,180 @@ module tsqr
       ! compute local Qs for global R
       call tsqr_reduction_tree_reduce(Qred_p, R_p, n, tree)
       call dtpttr('U', n, R_p, R, n, ier)
-      call dtpttr('U', n, Qred_p, Qred(1:n, 1:n), n, ier)
 
       ! apply householder reflectors
-      ! TODO: save memory by doing this in situ
-      call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, query, -1, ier)
-      lwork = int(query(1))
-      allocate(work(lwork))
-      call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, work, lwork, ier)
-      deallocate(work)
+      if(.true.) then
+        ! if enough memory for Qred use super fast dormqr
+        allocate(Qred(m,n))
+        Qred = 0.0d0
+        call dtpttr('U', n, Qred_p, Qred(1:n, 1:n), n, ier)
 
-      Q(:,:) = Qred(:,:)
+        call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, query1, -1, ier)
+        lwork1 = int(query1(1))
+        allocate(work1(lwork1))
+        call dormqr('L', 'N', m, n, n, Q, m, tau, Qred, m, work1, lwork1, ier)
+        deallocate(work1)
+
+        Q(:,:) = Qred(:,:)
+
+        deallocate(Qred)
+      else
+        ! if not enough memory, use slower inplace
+        !   speed depends on compiler optimization
+        !   but usally 4-5x slower than above method
+        call dtpttr('U', n, Qred_p, Q, m, ier)
+
+        call dormqr_inplace('L', 'N', m, n, n, Q, m, tau, query1, -1, query2, -1, ier)
+        lwork1 = int(query1(1))
+        lwork2 = int(query2(1,1))
+
+        allocate(work1(lwork1))
+        allocate(work2(m,lwork2))
+        call dormqr_inplace('L', 'N', m, n, n, Q, m, tau, work1, lwork1, work2, lwork2, ier)
+        deallocate(work1)
+        deallocate(work2)
+      end if
 
       deallocate(Qred_p)
-      deallocate(Qred)
       deallocate(R_p)
       deallocate(tau)
 
     end subroutine tsqr_qr
+
+
+    subroutine dormqr_inplace(SIDE, TRANS, M, N, K, A, LDA, TAU, &
+        WORK, LWORK, WORK2, LWORK2, INFO)
+      ! .. Scalar Arguments ..
+      character :: side, trans
+      integer   :: info, k, lda, lwork, lwork2, m, n
+
+      ! .. Array Arguments ..
+      real(8) :: A(lda, *), tau(*), work(*),  WORK2(lda, lwork2)
+
+      ! ====================================
+      ! .. Parameters ..
+      integer, parameter :: nbmax = 2
+      integer, parameter :: ldt = nbmax + 1
+      integer, parameter :: tsize = ldt * nbmax
+
+      ! .. Local Scalars ..
+      logical :: left, lquery, notran
+      integer :: i, i1, i2, i3, ib, ic, iwt, jc, ldwork, &
+        lwkopt, mi, nb, nbmin, ni, nq, nw, ii
+
+      ! .. External Functions ..
+      logical LSAME
+      integer ILAENV
+      external lsame, ilaenv
+
+      ! .. External Subroutines ..
+      external dlarfb, dlarft, dorm2r, xerbla
+
+      ! .. intrinsic functions ..
+      intrinsic max, min
+
+      ! .. Executable Statements ..
+      ! Test the input arguments
+      info = 0
+      left = lsame(side, 'L')
+      notran = lsame(trans, 'N')
+      lquery = lwork .eq. -1
+
+      IF( left ) THEN
+        nq = m
+        nw = max( 1, n )
+      END IF
+
+      IF( .NOT.left ) THEN
+        info = -1
+      ELSE IF( .NOT.notran ) THEN
+        info = -2
+      ELSE IF( m.LT.0 ) THEN
+        info = -3
+      ELSE IF( n.LT.0 ) THEN
+        info = -4
+      ELSE IF( k.LT.0 .OR. k.GT.n ) THEN
+        info = -5
+      ELSE IF( lda.LT.max( 1, nq ) ) THEN
+        info = -7
+      ELSE IF( lwork.LT.nw .AND. .NOT.lquery ) THEN
+        info = -12
+      END IF
+
+      IF( info.EQ.0 ) THEN
+        ! Compute the workspace requirements
+        nb = min( nbmax, ilaenv( 1, 'DORMQR', side // trans, m, n, k, -1 ) )
+        lwkopt = nw*nb + tsize
+        work( 1 )    = lwkopt
+        work2( 1,1 ) = nb
+      END IF
+
+      IF( info.NE.0 ) THEN
+        CALL xerbla( 'DORMQR', -info )
+        RETURN
+      ELSE IF( lquery ) THEN
+        RETURN
+      END IF
+
+      ! quick return if possible
+      IF( m.EQ.0 .OR. n.EQ.0 .OR. k.EQ.0 ) THEN
+        work( 1 ) = 1
+        work2( 1,1 ) = 1
+        RETURN
+      END IF
+
+      nbmin = 2
+      ldwork = nw
+      IF( nb.GT.1 .AND. nb.LT.k ) THEN
+        IF( lwork.LT.lwkopt .OR. lwork2.lt.nb) THEN
+          nb = min(lwork, (lwork-tsize) / ldwork)
+          nbmin = max( 2, ilaenv( 2, 'DORMQR', side // trans, m, n, k, -1 ) )
+        END IF
+      END IF
+
+      IF( nb.LT.nbmin .OR. nb.GE.k ) THEN
+        ! Use unblocked code
+        write(*,*) "TODO nb: ", nb, nbmin, k
+        ! CALL dorm2r( side, trans, m, n, k, a, lda, tau, c, ldc, work, iinfo )
+      ELSE
+        ! Use blocked code
+        iwt = 1 + nw*nb
+
+        i1 = ( ( k-1 ) / nb )*nb + 1
+        i2 = 1
+        i3 = -nb
+
+        ni = n
+        jc = 1
+
+        DO i = i1, i2, i3
+          ib = min( nb, k-i+1)
+
+          call dlarft( 'Forward', 'Columnwise', nq-i+1, ib, a( i, i ),&
+            lda, tau(i), work(iwt), ldt)
+          ! copy block reflector to be used by dlarfb
+          ! allocate(cc(lda, ib))
+          work2 = 0.0d0
+          work2 = a(1:lda, i:i+k)
+          ! zero out used reflector elements
+          do ii = i,i+ib-1
+              a( ii+1:m,ii ) = 0.0d0
+          end do
+
+          ! H is applied to C(i:m,1:n)
+          mi = m - i + 1
+          ic = i
+
+          ! Apply H
+          CALL dlarfb( side, trans, 'Forward', 'Columnwise', mi, n-ic+1, &
+            ib, work2(i,1), lda, work( iwt ), ldt, &
+            a( ic, ic ), lda, work, ldwork )
+        END DO
+      END IF
+      work(1) = lwkopt
+      work2( 1,1) = nb
+      RETURN
+    end subroutine
 
     subroutine qr_local(A, R_p, tau)
       real(8), intent(inout) :: A(:,:), R_p(:)
