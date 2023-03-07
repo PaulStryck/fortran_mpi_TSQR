@@ -3,6 +3,8 @@ module reduction_tree_m
 
   implicit none
 
+  private
+
   type reduction_tree_node
     integer :: l = 0
     integer :: r = 0
@@ -16,6 +18,17 @@ module reduction_tree_m
     type(reduction_tree_node), allocatable :: nodes(:)
     type(MPI_COMM) :: comm
   end type reduction_tree
+
+  !--------------
+  ! Public Types
+  !--------------
+  public reduction_tree
+
+  !------------------
+  ! Public Procedures
+  !------------------
+  public binaryReductionTree, mpiReductionTree
+
 
   contains
 
@@ -38,7 +51,7 @@ module reduction_tree_m
 
       tree%comm = comm
       tree%parent_of_leaf = r - (mod(r,2))
-      allocate(tree%nodes(s))
+      allocate(tree%nodes(s), source=reduction_tree_node(0, 0, 0, .false.))
 
       if(r .eq. s-1 .and. mod(r,2) .eq. 0) tree%parent_of_leaf = r-2
 
@@ -88,12 +101,12 @@ module reduction_tree_m
       call mpi_comm_rank(comm, rnk)
       call mpi_comm_size(comm, sze)
 
-      allocate(recv_reqs(1))    ! this will frequently be extended
+      allocate(recv_reqs(1), source=MPI_REQUEST(-1))    ! this will frequently be extended
 
       ! references to members of tree%nodes(i) will be used as buffers
       !   thus they MUST NEVER change their memory address.
       ! allocate upper limit so it will never move in memory
-      allocate(tree%nodes(sze))
+      allocate(tree%nodes(sze), source=reduction_tree_node(0,0,0,.false.))
       tree%nnodes = 0 ! keep track of actually used nodes
 
 
@@ -113,6 +126,8 @@ module reduction_tree_m
 
       call mpi_op_free(op)
       call mpi_waitall(size(recv_reqs), recv_reqs, MPI_STATUSES_IGNORE)
+
+      deallocate(recv_reqs)
 
       contains
 
@@ -160,6 +175,7 @@ end module reduction_tree_m
 
 
 module tsqr
+  use mpi_f08
   use reduction_tree_m
 
   implicit none
@@ -202,13 +218,9 @@ module tsqr
       n = size(Q, 2)
       s = (n*n+n) / 2
 
-      allocate(tau(n))
-      allocate(R_p(s))
-      allocate(Qred_p(s))
-
-      Qred_p = 0.0d0
-      R_p = 0.0d0
-      tau = 0.0d0
+      allocate(tau(n), source=0.0d0)
+      allocate(R_p(s), source=0.0d0)
+      allocate(Qred_p(s), source=0.0d0)
 
       ! compute local Q, R
       ! Q is overwritten by householder reflectors
@@ -255,8 +267,8 @@ module tsqr
         lwork1 = int(query1(1))
         lwork2 = int(query2(1,1))
 
-        allocate(work1(lwork1))
-        allocate(work2(m,lwork2))
+        allocate(work1(lwork1), source=0.0d0)
+        allocate(work2(m,lwork2), source=0.0d0)
         call dormqr_inplace('L', 'N', m, n, n, Q, m, tau, work1, lwork1, work2, lwork2, ier)
         deallocate(work1)
         deallocate(work2)
@@ -291,7 +303,7 @@ module tsqr
       call dgeqrf(mA, nA, A, lda, tau, query, -1, ier)
       lwork = int(query(1))
 
-      allocate(work(lwork))
+      allocate(work(lwork), source=0.0d0)
       call dgeqrf(mA, nA, A, lda, tau, work, lwork, ier)
       deallocate(work)
 
@@ -360,8 +372,8 @@ module tsqr
         allocate(buff_Q(i)%r(s), source=0.0d0)
       end do
 
-      allocate(recv_req_l(tree%nnodes))
-      allocate(recv_req_r(tree%nnodes))
+      allocate(recv_req_l(tree%nnodes), source=MPI_REQUEST(-1))
+      allocate(recv_req_r(tree%nnodes), source=MPI_REQUEST(-1))
 
       Q_p  = 0.0d0
 
@@ -400,7 +412,7 @@ module tsqr
 
       ! backpropagate tree
       ! generate recv request for all nodes
-      allocate(recv_req_l(tree%nnodes))
+      allocate(recv_req_l(tree%nnodes), source=MPI_REQUEST(-1))
       do i = tree%nnodes, 1, -1
         if(tree%nodes(i)%is_root) cycle
 
@@ -488,18 +500,17 @@ module tsqr
 
       lda = m
 
-      allocate(R(m,n))
+      allocate(R(m,n), source=0.0d0)
 
       ! stack packed Rl, Rr
-      R = 0.0d0
       call dtpttr('U', n, Rl, R, lda, ier)
       call dtpttr('U', n, Rr, R(n+1:, 1:n), n, ier)
 
-      allocate(tau(n))
+      allocate(tau(n), source=0.0d0)
       call dgeqrf(m, n, R, lda, tau, query, -1, ier)
       lwork = int(query(1))
 
-      allocate(work(lwork))
+      allocate(work(lwork), source=0.0d0)
       call dgeqrf(m, n, R, lda, tau, work, lwork, ier)
 
       ! recover new upper triag as packed
