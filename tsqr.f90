@@ -280,7 +280,7 @@ module tsqr
 
       ! ====================================
       ! .. Parameters ..
-      integer, parameter :: nbmax = 2
+      integer, parameter :: nbmax = 64
       integer, parameter :: ldt = nbmax + 1
       integer, parameter :: tsize = ldt * nbmax
 
@@ -380,9 +380,9 @@ module tsqr
           call dlarft( 'Forward', 'Columnwise', nq-i+1, ib, a( i, i ),&
             lda, tau(i), work(iwt), ldt)
           ! copy block reflector to be used by dlarfb
-          ! allocate(cc(lda, ib))
           work2 = 0.0d0
-          work2 = a(1:lda, i:i+k)
+          work2(1:lda, 1:ib) = a(1:lda, i:i+ib-1)
+
           ! zero out used reflector elements
           do ii = i,i+ib-1
               a( ii+1:m,ii ) = 0.0d0
