@@ -174,6 +174,9 @@ module tsqr
     real(8), allocatable :: r(:,:)
   end type dense_buffer
 
+  integer :: rnk
+  logical :: onmainl
+
   contains
 
     subroutine tsqr_qr(Q, R, tree)
@@ -188,6 +191,11 @@ module tsqr
       integer :: lwork1, lwork2, ier
       real(8) :: query1(1), query2(1,1)
       real(8), allocatable :: work1(:), work2(:,:)
+
+      real(8) :: tic, toc
+
+      call mpi_comm_rank(MPI_COMM_WORLD, rnk)
+      onmainl = rnk.EQ.0
 
 
       m = size(Q, 1)
@@ -205,13 +213,20 @@ module tsqr
       ! compute local Q, R
       ! Q is overwritten by householder reflectors
       ! R_p contains packed upper triag R
+      call cpu_time(tic)
       call qr_local(Q, R_p, tau)
+      call cpu_time(toc)
+      if(onmainl) write(*,*) "local qr:", toc - tic
 
       ! compute local Qs for global R
+      call cpu_time(tic)
       call tsqr_reduction_tree_reduce(Qred_p, R_p, n, tree)
       call dtpttr('U', n, R_p, R, n, ier)
+      call cpu_time(toc)
+      if(onmainl) write(*,*) "comm:", toc - tic
 
       ! apply householder reflectors
+      call cpu_time(tic)
       if(.true.) then
         ! if enough memory for Qred use super fast dormqr
         allocate(Qred(m,n))
@@ -244,6 +259,8 @@ module tsqr
         deallocate(work1)
         deallocate(work2)
       end if
+      call cpu_time(toc)
+      if(onmainl) write(*,*) "loc -> glob:", toc - tic
 
       deallocate(Qred_p)
       deallocate(R_p)
