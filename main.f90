@@ -6,14 +6,14 @@ program main
 
   implicit none
 
-  integer, parameter :: n = 500
-  integer, parameter :: m = 100000
+  integer :: n = 500
+  integer :: m = 100000
 
   type(reduction_tree) :: tree
 
-  real(8) :: A(m,n)
-  real(8) :: Q(m,n)
-  real(8) :: R(n,n)
+  real(8), allocatable :: A(:,:)
+  real(8), allocatable :: Q(:,:)
+  real(8), allocatable :: R(:,:)
   real(8) :: x
 
   logical :: onmain
@@ -28,6 +28,11 @@ program main
   call mpi_comm_rank(MPI_COMM_WORLD, thisprocess, ier)
 
   onmain = thisprocess.eq.0
+
+  m = thisprocess + m
+  allocate(A(m,n))
+  allocate(Q(m,n))
+  allocate(R(n,n))
 
   ! generate reduction tree
   call mpiReductionTree(MPI_COMM_WORLD, tree, 0)
