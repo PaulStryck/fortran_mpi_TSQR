@@ -431,7 +431,6 @@ module tsqr
         if(tree%nodes(tree%nnodes)%is_root) then
           ! root contains global R
           R_p = buff_R(tree%nnodes)%l
-          ! call mpi_bcast(R_p, s, dt, 0, tree%comm, ier)
 
           call mpi_send(buff_Q(tree%nnodes)%l, s, dt, tree%nodes(tree%nnodes)%l, &
             TAG, tree%comm, ier)
