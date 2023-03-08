@@ -46,7 +46,8 @@ program main
   A(:,:) = Q(:,:)
 
   call mpi_barrier(MPI_COMM_WORLD); call cpu_time(tic)
-  call tsqr_qr(Q, R, tree)
+  call tsqr_qr(Q, R, tree, ier)
+  if(ier .ne. 0) write(*,*) "error on proc:", thisprocess
   call mpi_barrier(MPI_COMM_WORLD); call cpu_time(toc)
   if(onmain) write(*,*) "tsqr", toc - tic
 

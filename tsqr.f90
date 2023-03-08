@@ -198,10 +198,11 @@ module tsqr
 
   contains
 
-    subroutine tsqr_qr(Q, R, tree)
+    subroutine tsqr_qr(Q, R, tree, info)
       real(8), intent(inout) :: Q(:,:)
       real(8), intent(out)   :: R(:,:)
       type(reduction_tree), intent(in) :: tree
+      integer, intent(out)   :: info
 
       real(8), allocatable :: tau(:)
       real(8), allocatable :: R_p(:), Qred_p(:), Qred(:,:)
@@ -220,6 +221,17 @@ module tsqr
       m = size(Q, 1)
       n = size(Q, 2)
       s = (n*n+n) / 2
+
+      info = 0
+      if(.not. equal_everywhere(n, tree%comm)) then
+        info = -1
+      end if
+
+      if( m .lt. n) then
+        info = -2
+      end if
+
+      if(info .ne. 0) return
 
       allocate(tau(n), source=0.0d0)
       allocate(R_p(s), source=0.0d0)
@@ -719,4 +731,23 @@ module tsqr
       work2( 1,1) = nb
       RETURN
     end subroutine
+
+    !=======
+    ! Helper function to check equality of n on all ranks of comm
+    function equal_everywhere(n, comm) result(p)
+      integer, intent(in) :: n
+      type(MPI_COMM), intent(in) :: comm
+
+      logical :: p
+
+      integer :: c(2), ier
+
+      c(1) = -n
+      c(2) = n
+
+      call mpi_allreduce(MPI_IN_PLACE, c, 2, MPI_INT, MPI_MIN, comm, ier)
+
+      p = c(1).eq.(-c(2))
+
+    end function equal_everywhere
 end module tsqr
