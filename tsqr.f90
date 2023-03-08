@@ -17,6 +17,7 @@ module reduction_tree_m
     integer :: nnodes = 0
     type(reduction_tree_node), allocatable :: nodes(:)
     type(MPI_COMM) :: comm
+    integer :: root
   end type reduction_tree
 
   !--------------
@@ -50,6 +51,7 @@ module reduction_tree_m
       call MPI_Comm_size(comm, s, ier);
 
       tree%comm = comm
+      tree%root = 0
       tree%parent_of_leaf = r - (mod(r,2))
       allocate(tree%nodes(s), source=reduction_tree_node(0, 0, 0, .false.))
 
@@ -97,6 +99,7 @@ module reduction_tree_m
       cnt = 0
 
       tree%comm = comm
+      tree%root = root
 
       call mpi_comm_rank(comm, rnk)
       call mpi_comm_size(comm, sze)
@@ -454,7 +457,7 @@ module tsqr
       end do
 
       call mpi_wait(leaf_req, MPI_STATUS_IGNORE, ier)
-      call mpi_bcast(R_p, s, dt, 0, tree%comm, ier)
+      call mpi_bcast(R_p, s, dt, tree%root, tree%comm, ier)
 
       ! Q_leaf_buffer has asynchronous attribute,
       !  but has been awaitet above.
